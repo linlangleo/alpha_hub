@@ -1,0 +1,1 @@
+"""AlphaHub application package."""

@@ -1,0 +1,54 @@
+{
+  "database": {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "user": "postgres",
+    "password": "postgres_dev",
+    "database": "alpha_hub",
+    "connect_timeout": 5
+  },
+  "redis": {
+    "host": "127.0.0.1",
+    "port": 6379,
+    "password": "A3x!J9e@F#2R",
+    "db": 0,
+    "session_expire_seconds": 28800
+  },
+  "qdrant": {
+    "url": "http://127.0.0.1:6333",
+    "collection": "alpha_knowledge"
+  },
+  "minio": {
+    "endpoint": "127.0.0.1:9000",
+    "access_key": "minio",
+    "secret_key": "minio_dev",
+    "bucket": "alpha-hub",
+    "secure": false
+  },
+  "deepseek": {
+    "api_key": "",
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-v4-flash",
+    "timeout": 60,
+    "retry": 3,
+    "max_input_chars": 80000,
+    "max_output_tokens": 8192
+  },
+  "embedding": {
+    "model": "BAAI/bge-m3",
+    "dimension": 1024,
+    "device": "cpu",
+    "batch_size": 4,
+    "max_length": 8192
+  },
+  "knowledge": {
+    "mode": "hybrid",
+    "top_k": 8,
+    "neighbor_window": 1,
+    "neighbor_expand_top_n": 3,
+    "context_max_chars": 100,
+    "chunk_analysis_batch_size": 6,
+    "max_chunk_chars": 6000,
+    "max_upload_size_mb": 50
+  }
+}

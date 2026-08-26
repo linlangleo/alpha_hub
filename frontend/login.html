@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · AlphaHub</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body class="login-page">
+  <main class="card login-card">
+    <p class="eyebrow">ALPHAHUB</p>
+    <h1>AlphaHub</h1>
+    <p class="muted">登录后进入个人知识工作台。</p>
+    <form id="login-form">
+      <label>用户名<input id="username" autocomplete="username" required></label>
+      <label>密码<input id="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">登录</button>
+      <p id="message" class="message"></p>
+    </form>
+  </main>
+  <script src="/assets/api.js"></script>
+  <script src="/assets/login.js"></script>
+</body>
+</html>
