@@ -57,6 +57,24 @@ def test_max_length_protection_has_no_overlap() -> None:
     assert all(len(content) <= 6000 for content in contents)
 
 
+def test_long_image_analysis_keeps_one_image_reference_without_overlap() -> None:
+    original = "图" * 7000
+    block = DocumentBlock(
+        type="image",
+        index=0,
+        text=original,
+        image_id="image_001",
+        object_key="raw/image/1/example.png",
+    )
+
+    groups = KnowledgeIngestionWorkflow._protect_max_length([block])
+    contents = [item.content() for group in groups for item in group]
+
+    assert sum("[[IMAGE:image_001]]" in content for content in contents) == 1
+    assert "".join(contents).replace("[[IMAGE:image_001]]\n\n", "") == original
+    assert all(len(content) <= 6000 for content in contents)
+
+
 def test_qdrant_rejects_authoritative_content_payload() -> None:
     service = QdrantService(
         url="http://127.0.0.1:6333",

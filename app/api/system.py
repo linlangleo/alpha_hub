@@ -1,8 +1,12 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 
 from app.api.auth import require_user_id
+from app.common.codes import SystemCode
+from app.common.exception import BusinessException
+from app.common.response import R
 from app.core.config import SETTINGS
 from app.core.database import check_database
 from app.core.redis_client import check_redis
@@ -17,14 +21,20 @@ from app.services.container import (
 router = APIRouter(prefix="/api/system", tags=["system"])
 
 
+class ServiceTestRequest(BaseModel):
+    service_name: str
+
+
 @router.get("/config")
-def public_config(user_id: int = Depends(require_user_id)) -> dict[str, Any]:
+def public_config(user_id: int = Depends(require_user_id)) -> R[dict[str, Any]]:
     del user_id
-    return {
+    return R.ok({
         "deepseek": {
             "configured": bool(SETTINGS.deepseek_api_key),
             "base_url": SETTINGS.deepseek_base_url,
             "model": SETTINGS.deepseek_model,
+            "text_models": SETTINGS.deepseek_text_models,
+            "vision_model": SETTINGS.deepseek_vision_model,
             "timeout": SETTINGS.deepseek_timeout,
             "retry": SETTINGS.deepseek_retry,
         },
@@ -52,31 +62,38 @@ def public_config(user_id: int = Depends(require_user_id)) -> dict[str, Any]:
             "context_max_chars": SETTINGS.context_max_chars,
             "chunk_analysis_batch_size": SETTINGS.chunk_analysis_batch_size,
         },
-    }
+    })
 
 
-@router.post("/test/{service_name}")
+@router.post("/services/test")
 def test_service(
-    service_name: str,
+    payload: ServiceTestRequest,
     user_id: int = Depends(require_user_id),
-) -> dict[str, Any]:
+) -> R[dict[str, Any]]:
     del user_id
+    service_name = payload.service_name.strip().lower()
     try:
         if service_name == "postgresql":
-            return {"success": check_database()}
+            return R.ok({"success": check_database()})
         if service_name == "redis":
-            return {"success": check_redis()}
+            return R.ok({"success": check_redis()})
         if service_name == "minio":
-            return {"success": check_storage()}
+            return R.ok({"success": check_storage()})
         if service_name == "qdrant":
-            return {"success": check_vector_store()}
+            return R.ok({"success": check_vector_store()})
         if service_name == "deepseek":
             reply = get_deepseek_service().chat("只回答 OK。", "连接测试")
-            return {"success": bool(reply), "message": reply[:100]}
+            return R.ok({"success": bool(reply), "message": reply[:100]})
         if service_name == "embedding":
             vector = get_embedding_service().encode_query("AlphaHub 向量模型连接测试")
-            return {"success": True, "dense_dimension": len(vector.dense),
-                    "sparse_terms": len(vector.sparse.indices)}
+            return R.ok({
+                "success": True,
+                "dense_dimension": len(vector.dense),
+                "sparse_terms": len(vector.sparse.indices),
+            })
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    raise HTTPException(status_code=404, detail="未知服务")
+        raise BusinessException(
+            SystemCode.SERVICE_UNAVAILABLE,
+            f"{service_name or '指定'}服务测试失败",
+        ) from exc
+    raise BusinessException(SystemCode.UNKNOWN_SERVICE)

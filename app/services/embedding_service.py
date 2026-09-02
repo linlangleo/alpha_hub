@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -36,6 +37,10 @@ class EmbeddingService(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def prepare(self) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def encode_documents(self, texts: list[str]) -> list[HybridEmbedding]:
         raise NotImplementedError
 
@@ -54,12 +59,14 @@ class BgeM3EmbeddingService(EmbeddingService):
         device: str = "cpu",
         batch_size: int = 4,
         max_length: int = 8192,
+        download_if_missing: bool = True,
     ) -> None:
         self._model_name = model_name
         self._dimension = dimension
         self.device = device
         self.batch_size = batch_size
         self.max_length = max_length
+        self.download_if_missing = download_if_missing
         self._model: Any = None
         self._lock = Lock()
         self._inference_lock = Lock()
@@ -72,6 +79,9 @@ class BgeM3EmbeddingService(EmbeddingService):
     def dimension(self) -> int:
         return self._dimension
 
+    def prepare(self) -> None:
+        self._get_model()
+
     def _get_model(self) -> Any:
         if self._model is None:
             with self._lock:
@@ -83,11 +93,73 @@ class BgeM3EmbeddingService(EmbeddingService):
                             "BGE-M3 需要 FlagEmbedding，请安装 requirements.txt"
                         ) from exc
                     self._model = BGEM3FlagModel(
-                        self._model_name,
+                        self._resolve_model_source(),
                         use_fp16=self.device.lower().startswith("cuda"),
                         devices=self.device,
                     )
         return self._model
+
+    def _resolve_model_source(self) -> str:
+        configured_path = Path(self._model_name).expanduser()
+        if configured_path.is_dir():
+            self._require_complete_model(configured_path)
+            return str(configured_path.resolve())
+
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError as exc:
+            raise RuntimeError(
+                "BGE-M3 本地缓存解析需要 huggingface-hub，请安装 requirements.txt"
+            ) from exc
+
+        download_options = {
+            "repo_id": self._model_name,
+            "ignore_patterns": ["onnx/*", "imgs/*", "*.jpg", "*.webp"],
+        }
+        local_path: Path | None = None
+        try:
+            local_path = Path(snapshot_download(local_files_only=True, **download_options))
+        except Exception:
+            local_path = None
+
+        if local_path is not None and self._is_complete_model(local_path):
+            return str(local_path.resolve())
+        if not self.download_if_missing:
+            raise RuntimeError(
+                f"本地未找到完整的 Embedding 模型 {self._model_name}，且已禁止自动下载"
+            )
+
+        try:
+            downloaded_path = Path(snapshot_download(local_files_only=False, **download_options))
+        except Exception as exc:
+            raise RuntimeError(
+                f"本地未找到完整的 Embedding 模型 {self._model_name}，联网下载失败"
+            ) from exc
+        self._require_complete_model(downloaded_path)
+        return str(downloaded_path.resolve())
+
+    @staticmethod
+    def _is_complete_model(path: Path) -> bool:
+        has_weights = (path / "pytorch_model.bin").is_file() or (
+            path / "model.safetensors"
+        ).is_file()
+        has_tokenizer = (path / "tokenizer.json").is_file() or (
+            path / "sentencepiece.bpe.model"
+        ).is_file()
+        return all(
+            [
+                (path / "config.json").is_file(),
+                has_weights,
+                has_tokenizer,
+                (path / "sparse_linear.pt").is_file(),
+                (path / "colbert_linear.pt").is_file(),
+            ]
+        )
+
+    @classmethod
+    def _require_complete_model(cls, path: Path) -> None:
+        if not cls._is_complete_model(path):
+            raise RuntimeError(f"Embedding 模型目录不完整: {path}")
 
     def encode_documents(self, texts: list[str]) -> list[HybridEmbedding]:
         if not texts:

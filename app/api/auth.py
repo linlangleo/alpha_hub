@@ -1,7 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
+from app.common.codes import AuthCode
+from app.common.exception import BusinessException
+from app.common.response import R
 from app.core.redis_client import (
     create_session,
     delete_session,
@@ -23,44 +26,35 @@ def require_user_id(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> int:
     if credentials is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="请先登录",
-        )
+        raise BusinessException(AuthCode.LOGIN_REQUIRED)
     user_id = get_session_user_id(credentials.credentials)
     if user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="登录已失效",
-        )
+        raise BusinessException(AuthCode.SESSION_EXPIRED)
     return user_id
 
 
 @router.post("/login")
-def login(payload: LoginRequest) -> dict[str, str]:
+def login(payload: LoginRequest) -> R[dict[str, str]]:
     user = authenticate_user(payload.username.strip(), payload.password)
     if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="用户名或密码错误",
-        )
+        raise BusinessException(AuthCode.INVALID_CREDENTIALS)
     token = create_session(user["id"])
-    return {
+    return R.ok({
         "access_token": token,
         "token_type": "bearer",
         "username": user["username"],
-    }
+    })
 
 
-@router.get("/check")
-def check_login(user_id: int = Depends(require_user_id)) -> dict[str, object]:
-    return {"authenticated": True, "user_id": user_id}
+@router.get("/check-login")
+def check_login(user_id: int = Depends(require_user_id)) -> R[dict[str, object]]:
+    return R.ok({"authenticated": True, "user_id": user_id})
 
 
 @router.post("/logout")
 def logout(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-) -> dict[str, bool]:
+) -> R[dict[str, bool]]:
     if credentials is not None:
         delete_session(credentials.credentials)
-    return {"success": True}
+    return R.ok({"success": True})

@@ -26,6 +26,7 @@ def get_embedding_service() -> EmbeddingService:
         device=SETTINGS.embedding_device,
         batch_size=SETTINGS.embedding_batch_size,
         max_length=SETTINGS.embedding_max_length,
+        download_if_missing=SETTINGS.embedding_download_if_missing,
     )
 
 

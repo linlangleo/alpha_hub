@@ -8,7 +8,7 @@ from app.core.snowflake import generate_id
 
 def create_document(document_id: int, name: str, original_filename: str,
                     source_type: str, source_name: str, category: str,
-                    strategy_id: int | None, metadata: dict[str, Any],
+                    strategy_id: int | None, file_type: str, metadata: dict[str, Any],
                     user_id: int) -> dict[str, Any]:
     with get_connection() as connection:
         return connection.execute(
@@ -16,11 +16,11 @@ def create_document(document_id: int, name: str, original_filename: str,
             INSERT INTO knowledge_document (
                 id, knowledge_base_id, strategy_id, name, file_type, original_filename, source_type,
                 source_name, category, status, metadata, create_by, update_by
-            ) VALUES (%s, %s, %s, %s, 'docx', %s, %s, %s, %s, 'UPLOADED', %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'UPLOADED', %s, %s, %s)
             RETURNING *
             ''',
-            (document_id, user_id, strategy_id, name, original_filename, source_type, source_name,
-             category, Jsonb(metadata), user_id, user_id),
+            (document_id, user_id, strategy_id, name, file_type, original_filename, source_type,
+             source_name, category, Jsonb(metadata), user_id, user_id),
         ).fetchone()
 
 
@@ -67,6 +67,61 @@ def get_document(document_id: int, user_id: int) -> dict[str, Any] | None:
             ''',
             (document_id, user_id),
         ).fetchone()
+
+
+def find_document(document_id: int) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT id, create_by, status, file_type, minio_bucket, minio_object_key, metadata
+            FROM knowledge_document
+            WHERE id = %s
+            """,
+            (document_id,),
+        ).fetchone()
+
+
+def claim_failed_document(document_id: int, user_id: int) -> bool:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            UPDATE knowledge_document
+            SET status = 'PROCESSING',
+                metadata = metadata || %s,
+                update_time = CURRENT_TIMESTAMP,
+                update_by = %s
+            WHERE id = %s AND create_by = %s AND status = 'FAILED'
+            RETURNING id
+            """,
+            (
+                Jsonb(
+                    {
+                        "processing_stage": "REPROCESS_QUEUED",
+                        "progress": 0,
+                        "stage_label": "等待重新处理",
+                        "error_stage": None,
+                        "error_message": None,
+                    }
+                ),
+                user_id,
+                document_id,
+                user_id,
+            ),
+        ).fetchone()
+    return row is not None
+
+
+def delete_document(document_id: int, user_id: int) -> bool:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            DELETE FROM knowledge_document
+            WHERE id = %s AND create_by = %s
+            RETURNING id
+            """,
+            (document_id, user_id),
+        ).fetchone()
+    return row is not None
 
 
 def list_documents(user_id: int, limit: int = 100) -> list[dict[str, Any]]:

@@ -4,6 +4,7 @@ from io import BytesIO
 from typing import BinaryIO
 
 from minio import Minio
+from minio.deleteobjects import DeleteObject
 
 
 class StorageService(ABC):
@@ -27,6 +28,10 @@ class StorageService(ABC):
 
     @abstractmethod
     def delete(self, object_key: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def delete_prefix(self, prefix: str) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -92,6 +97,21 @@ class MinioStorageService(StorageService):
     def delete(self, object_key: str) -> None:
         if object_key:
             self.client.remove_object(self.bucket, object_key)
+
+    def delete_prefix(self, prefix: str) -> None:
+        normalized = prefix.strip().lstrip("/")
+        if not normalized or not normalized.endswith("/"):
+            raise ValueError("删除前缀不能为空且必须以 / 结尾")
+        delete_objects = (
+            DeleteObject(item.object_name)
+            for item in self.client.list_objects(self.bucket, prefix=normalized, recursive=True)
+        )
+        errors = list(self.client.remove_objects(self.bucket, delete_objects))
+        if errors:
+            details = "; ".join(
+                f"{error.name}: {error.code} {error.message}" for error in errors
+            )
+            raise RuntimeError(f"MinIO 批量删除失败: {details}")
 
     def presigned_get_url(self, object_key: str, expires_seconds: int = 3600) -> str:
         return self.client.presigned_get_object(

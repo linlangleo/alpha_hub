@@ -13,6 +13,8 @@ from app.api.search import router as search_router
 from app.api.strategies import router as strategies_router
 from app.api.tags import router as tags_router
 from app.api.system import router as system_router
+from app.common.handler import register_handlers
+from app.common.response import R
 from app.core.database import check_database, get_connection
 from app.core.redis_client import check_redis, init_redis
 
@@ -34,7 +36,12 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="AlphaHub", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="AlphaHub",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+register_handlers(app)
 app.include_router(auth_router)
 app.include_router(dashboard_router)
 app.include_router(knowledge_router)
@@ -46,15 +53,15 @@ app.mount("/assets", StaticFiles(directory=FRONTEND_DIR), name="assets")
 
 
 @app.get("/api/health")
-def health() -> dict[str, object]:
+def health() -> R[dict[str, object]]:
     services = {
         "postgres": check_database(),
         "redis": check_redis(),
     }
-    return {
+    return R.ok({
         "status": "ok" if all(services.values()) else "degraded",
         "services": services,
-    }
+    })
 
 
 @app.get("/", include_in_schema=False)

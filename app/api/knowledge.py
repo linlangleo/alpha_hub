@@ -1,10 +1,13 @@
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_user_id
 from app.api.utils import serialize_ids
+from app.common.codes import KnowledgeCode, SystemCode
+from app.common.exception import BusinessException
+from app.common.response import R
 from app.repositories import knowledge_repository
 from app.services.knowledge_service import knowledge_service
 from app.workflows.knowledge_ingestion import knowledge_ingestion_workflow
@@ -13,27 +16,35 @@ from app.workflows.knowledge_ingestion import knowledge_ingestion_workflow
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
 
-class ChunkContentUpdate(BaseModel):
+class DocumentDeleteRequest(BaseModel):
+    document_id: int = Field(gt=0)
+
+
+class DocumentReprocessRequest(BaseModel):
+    document_id: int = Field(gt=0)
+
+
+class ChunkActionRequest(BaseModel):
+    chunk_id: int = Field(gt=0)
+
+
+class ChunkContentUpdate(ChunkActionRequest):
     content: str | None = Field(default=None, max_length=100_000)
     context: str | None = Field(default=None, max_length=200)
 
 
-class ChunkSummaryUpdate(BaseModel):
+class ChunkSummaryUpdate(ChunkActionRequest):
     summary: str = Field(default="", max_length=20_000)
 
 
-class ChunkMetadataUpdate(BaseModel):
+class ChunkMetadataUpdate(ChunkActionRequest):
     title: str | None = Field(default=None, max_length=500)
     chunk_type: str | None = Field(default=None, max_length=100)
     strategy_id: int | None = None
     tags: list[str] | None = None
 
 
-class RetrievalStatusUpdate(BaseModel):
-    retrieval_status: str
-
-
-@router.post("/documents")
+@router.post("/documents/upload")
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -41,8 +52,9 @@ async def upload_document(
     source_name: str = Form(default=""),
     category: str = Form(default="other"),
     strategy_id: str = Form(default=""),
+    analysis_model: str = Form(default=""),
     user_id: int = Depends(require_user_id),
-) -> dict[str, Any]:
+) -> R[dict[str, Any]]:
     try:
         selected_strategy_id = int(strategy_id) if strategy_id.strip() else None
         content = await file.read()
@@ -54,162 +66,277 @@ async def upload_document(
             source_name=source_name.strip()[:255],
             category=category.strip()[:100] or "other",
             strategy_id=selected_strategy_id,
+            analysis_model=analysis_model.strip(),
             user_id=user_id,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise BusinessException(KnowledgeCode.INVALID_PARAMETER, str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"上传失败: {exc}") from exc
+        raise BusinessException(
+            SystemCode.SERVICE_UNAVAILABLE,
+            KnowledgeCode.UPLOAD_FAILED.msg,
+        ) from exc
     background_tasks.add_task(knowledge_ingestion_workflow.process, int(document["id"]), user_id)
-    return serialize_ids(document)
+    return R.ok(serialize_ids(document))
 
 
-@router.get("/documents")
-def list_documents(user_id: int = Depends(require_user_id)) -> list[dict[str, Any]]:
-    return serialize_ids(knowledge_repository.list_documents(user_id))
+@router.get("/documents/list")
+def list_documents(user_id: int = Depends(require_user_id)) -> R[list[dict[str, Any]]]:
+    return R.ok(serialize_ids(knowledge_repository.list_documents(user_id)))
 
 
-@router.get("/documents/{document_id}")
+@router.get("/documents/detail/{document_id}")
 def document_detail(
     document_id: int,
     user_id: int = Depends(require_user_id),
-) -> dict[str, Any]:
+) -> R[dict[str, Any]]:
     try:
-        return serialize_ids(knowledge_service.detail(document_id, user_id))
+        return R.ok(serialize_ids(knowledge_service.detail(document_id, user_id)))
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise BusinessException(KnowledgeCode.DOCUMENT_NOT_FOUND, str(exc)) from exc
 
 
-@router.get("/documents/{document_id}/status")
+@router.get("/documents/status/{document_id}")
 def document_status(
     document_id: int,
     user_id: int = Depends(require_user_id),
-) -> dict[str, Any]:
+) -> R[dict[str, Any]]:
     document = knowledge_repository.get_document(document_id, user_id)
     if document is None:
-        raise HTTPException(status_code=404, detail="知识文档不存在")
-    return serialize_ids(
+        raise BusinessException(KnowledgeCode.DOCUMENT_NOT_FOUND)
+    return R.ok(serialize_ids(
         {
             "id": document["id"],
             "status": document["status"],
             "metadata": document["metadata"],
             "chunk_count": document["chunk_count"],
         }
-    )
+    ))
 
 
-@router.get("/documents/{document_id}/parsed")
+@router.get("/documents/parsed/{document_id}")
 def parsed_document(
     document_id: int,
     user_id: int = Depends(require_user_id),
-) -> dict[str, Any]:
+) -> R[dict[str, Any]]:
     try:
         detail = knowledge_service.detail(document_id, user_id)
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return serialize_ids({"document": detail, "chunks": detail["chunks"]})
+        raise BusinessException(KnowledgeCode.DOCUMENT_NOT_FOUND, str(exc)) from exc
+    return R.ok(serialize_ids({"document": detail, "chunks": detail["chunks"]}))
 
 
-@router.get("/documents/{document_id}/raw-url")
+@router.get("/documents/raw-url/{document_id}")
 def raw_document_url(
     document_id: int,
     user_id: int = Depends(require_user_id),
-) -> dict[str, str]:
+) -> R[dict[str, str]]:
     try:
-        return {"url": knowledge_service.raw_file_url(document_id, user_id)}
+        return R.ok({"url": knowledge_service.raw_file_url(document_id, user_id)})
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise BusinessException(KnowledgeCode.DOCUMENT_NOT_FOUND, str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise BusinessException(KnowledgeCode.RAW_FILE_UNAVAILABLE) from exc
 
 
-@router.patch("/chunks/{chunk_id}/content-context")
-def update_chunk_content_context(chunk_id: int, payload: ChunkContentUpdate,
-                                 user_id: int = Depends(require_user_id)) -> dict[str, Any]:
+@router.post("/documents/delete")
+def delete_document(
+    payload: DocumentDeleteRequest,
+    user_id: int = Depends(require_user_id),
+) -> R[dict[str, Any]]:
     try:
-        return serialize_ids(knowledge_service.update_chunk_and_reindex(
-            chunk_id, user_id, content=payload.content, context=payload.context
+        return R.ok(serialize_ids(
+            knowledge_service.delete_document(payload.document_id, user_id)
+        ))
+    except PermissionError as exc:
+        raise BusinessException(KnowledgeCode.DOCUMENT_FORBIDDEN, str(exc)) from exc
+    except LookupError as exc:
+        raise BusinessException(KnowledgeCode.DOCUMENT_NOT_FOUND, str(exc)) from exc
+    except ValueError as exc:
+        raise BusinessException(KnowledgeCode.DOCUMENT_STATE_INVALID, str(exc)) from exc
+    except Exception as exc:
+        raise BusinessException(
+            SystemCode.SERVICE_UNAVAILABLE,
+            KnowledgeCode.DOCUMENT_DELETE_FAILED.msg,
+        ) from exc
+
+
+@router.post("/documents/reprocess")
+def reprocess_document(
+    payload: DocumentReprocessRequest,
+    background_tasks: BackgroundTasks,
+    user_id: int = Depends(require_user_id),
+) -> R[dict[str, Any]]:
+    try:
+        result = knowledge_ingestion_workflow.prepare_reprocess(
+            payload.document_id,
+            user_id,
+        )
+    except PermissionError as exc:
+        raise BusinessException(KnowledgeCode.DOCUMENT_FORBIDDEN, str(exc)) from exc
+    except LookupError as exc:
+        raise BusinessException(KnowledgeCode.DOCUMENT_NOT_FOUND, str(exc)) from exc
+    except ValueError as exc:
+        raise BusinessException(KnowledgeCode.DOCUMENT_STATE_INVALID, str(exc)) from exc
+    except RuntimeError as exc:
+        raise BusinessException(KnowledgeCode.RAW_FILE_UNAVAILABLE, str(exc)) from exc
+    except Exception as exc:
+        raise BusinessException(
+            SystemCode.SERVICE_UNAVAILABLE,
+            "知识文档重新处理请求失败",
+        ) from exc
+    background_tasks.add_task(
+        knowledge_ingestion_workflow.reprocess,
+        payload.document_id,
+        user_id,
+        str(result["error_stage"]),
+    )
+    return R.ok(serialize_ids(result))
+
+
+@router.post("/chunks/update-content-context")
+def update_chunk_content_context(
+    payload: ChunkContentUpdate,
+    user_id: int = Depends(require_user_id),
+) -> R[dict[str, Any]]:
+    try:
+        return R.ok(serialize_ids(knowledge_service.update_chunk_and_reindex(
+            payload.chunk_id, user_id, content=payload.content, context=payload.context
+        )))
+    except LookupError as exc:
+        raise BusinessException(KnowledgeCode.CHUNK_NOT_FOUND, str(exc)) from exc
+    except ValueError as exc:
+        raise BusinessException(KnowledgeCode.INVALID_PARAMETER, str(exc)) from exc
+    except Exception as exc:
+        raise BusinessException(
+            SystemCode.SERVICE_UNAVAILABLE,
+            "Chunk 更新或重新向量化失败",
+        ) from exc
+
+
+@router.post("/chunks/update-summary")
+def update_chunk_summary(
+    payload: ChunkSummaryUpdate,
+    user_id: int = Depends(require_user_id),
+) -> R[dict[str, Any]]:
+    try:
+        return R.ok(serialize_ids(
+            knowledge_service.update_summary(payload.chunk_id, user_id, payload.summary)
         ))
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Chunk 更新或重新向量化失败: {exc}") from exc
+        raise BusinessException(KnowledgeCode.CHUNK_NOT_FOUND, str(exc)) from exc
 
 
-@router.patch("/chunks/{chunk_id}/summary")
-def update_chunk_summary(chunk_id: int, payload: ChunkSummaryUpdate,
-                         user_id: int = Depends(require_user_id)) -> dict[str, Any]:
+@router.post("/chunks/update-metadata")
+def update_chunk_metadata(
+    payload: ChunkMetadataUpdate,
+    user_id: int = Depends(require_user_id),
+) -> R[dict[str, Any]]:
     try:
-        return serialize_ids(knowledge_service.update_summary(chunk_id, user_id, payload.summary))
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@router.patch("/chunks/{chunk_id}/metadata")
-def update_chunk_metadata(chunk_id: int, payload: ChunkMetadataUpdate,
-                          user_id: int = Depends(require_user_id)) -> dict[str, Any]:
-    try:
-        return serialize_ids(knowledge_service.update_metadata(
-            chunk_id, user_id, title=payload.title, chunk_type=payload.chunk_type,
+        return R.ok(serialize_ids(knowledge_service.update_metadata(
+            payload.chunk_id, user_id, title=payload.title, chunk_type=payload.chunk_type,
                 strategy_id=payload.strategy_id,
                 strategy_provided="strategy_id" in payload.model_fields_set,
                 tags=payload.tags,
+        )))
+    except LookupError as exc:
+        raise BusinessException(KnowledgeCode.CHUNK_NOT_FOUND, str(exc)) from exc
+    except ValueError as exc:
+        raise BusinessException(KnowledgeCode.INVALID_PARAMETER, str(exc)) from exc
+    except Exception as exc:
+        raise BusinessException(
+            SystemCode.SERVICE_UNAVAILABLE,
+            "Chunk metadata 同步失败",
+        ) from exc
+
+
+@router.post("/chunks/regenerate-context")
+def regenerate_chunk_context(
+    payload: ChunkActionRequest,
+    user_id: int = Depends(require_user_id),
+) -> R[dict[str, Any]]:
+    try:
+        return R.ok(serialize_ids(
+            knowledge_service.regenerate_context(payload.chunk_id, user_id)
         ))
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise BusinessException(KnowledgeCode.CHUNK_NOT_FOUND, str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise BusinessException(KnowledgeCode.INVALID_PARAMETER, str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Chunk metadata 同步失败: {exc}") from exc
+        raise BusinessException(
+            SystemCode.SERVICE_UNAVAILABLE,
+            "Context 重新生成失败",
+        ) from exc
 
 
-@router.post("/chunks/{chunk_id}/regenerate-context")
-def regenerate_chunk_context(chunk_id: int,
-                             user_id: int = Depends(require_user_id)) -> dict[str, Any]:
+@router.post("/chunks/mark-reviewed")
+def review_chunk(
+    payload: ChunkActionRequest,
+    user_id: int = Depends(require_user_id),
+) -> R[dict[str, Any]]:
     try:
-        return serialize_ids(knowledge_service.regenerate_context(chunk_id, user_id))
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Context 重新生成失败: {exc}") from exc
-
-
-@router.post("/chunks/{chunk_id}/review")
-def review_chunk(chunk_id: int,
-                 user_id: int = Depends(require_user_id)) -> dict[str, Any]:
-    try:
-        return serialize_ids(knowledge_service.mark_reviewed(chunk_id, user_id))
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"审核状态同步失败: {exc}") from exc
-
-
-@router.patch("/chunks/{chunk_id}/retrieval-status")
-def update_retrieval_status(chunk_id: int, payload: RetrievalStatusUpdate,
-                            user_id: int = Depends(require_user_id)) -> dict[str, Any]:
-    try:
-        return serialize_ids(knowledge_service.set_retrieval_status(
-            chunk_id, user_id, payload.retrieval_status
+        return R.ok(serialize_ids(
+            knowledge_service.mark_reviewed(payload.chunk_id, user_id)
         ))
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise BusinessException(KnowledgeCode.CHUNK_NOT_FOUND, str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"检索状态同步失败: {exc}") from exc
+        raise BusinessException(
+            SystemCode.SERVICE_UNAVAILABLE,
+            "审核状态同步失败",
+        ) from exc
 
 
-@router.post("/chunks/{chunk_id}/reindex")
-def reindex_chunk(chunk_id: int,
-                  user_id: int = Depends(require_user_id)) -> dict[str, Any]:
+def _set_retrieval_status(
+    chunk_id: int,
+    retrieval_status: str,
+    user_id: int,
+) -> R[dict[str, Any]]:
     try:
-        return serialize_ids(knowledge_service.reindex_chunk(chunk_id, user_id))
+        return R.ok(serialize_ids(knowledge_service.set_retrieval_status(
+            chunk_id, user_id, retrieval_status
+        )))
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise BusinessException(KnowledgeCode.CHUNK_NOT_FOUND, str(exc)) from exc
+    except ValueError as exc:
+        raise BusinessException(KnowledgeCode.INVALID_PARAMETER, str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"重新向量化失败: {exc}") from exc
+        raise BusinessException(
+            SystemCode.SERVICE_UNAVAILABLE,
+            "检索状态同步失败",
+        ) from exc
+
+
+@router.post("/chunks/enable-retrieval")
+def enable_retrieval(
+    payload: ChunkActionRequest,
+    user_id: int = Depends(require_user_id),
+) -> R[dict[str, Any]]:
+    return _set_retrieval_status(payload.chunk_id, "active", user_id)
+
+
+@router.post("/chunks/disable-retrieval")
+def disable_retrieval(
+    payload: ChunkActionRequest,
+    user_id: int = Depends(require_user_id),
+) -> R[dict[str, Any]]:
+    return _set_retrieval_status(payload.chunk_id, "disabled", user_id)
+
+
+@router.post("/chunks/reindex")
+def reindex_chunk(
+    payload: ChunkActionRequest,
+    user_id: int = Depends(require_user_id),
+) -> R[dict[str, Any]]:
+    try:
+        return R.ok(serialize_ids(
+            knowledge_service.reindex_chunk(payload.chunk_id, user_id)
+        ))
+    except LookupError as exc:
+        raise BusinessException(KnowledgeCode.CHUNK_NOT_FOUND, str(exc)) from exc
+    except Exception as exc:
+        raise BusinessException(
+            SystemCode.SERVICE_UNAVAILABLE,
+            "重新向量化失败",
+        ) from exc

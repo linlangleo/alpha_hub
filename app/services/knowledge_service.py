@@ -13,6 +13,7 @@ CHUNK_TYPES = {
     "position_management", "risk_management", "intraday", "case", "review",
     "asset_allocation", "fund", "futures", "macro", "industry", "other",
 }
+DELETABLE_DOCUMENT_STATUSES = {"FAILED", "INDEXED"}
 
 
 class KnowledgeService:
@@ -33,6 +34,27 @@ class KnowledgeService:
         if not document.get("minio_object_key"):
             raise RuntimeError("文档尚未保存原始文件")
         return get_storage_service().presigned_get_url(document["minio_object_key"])
+
+    def delete_document(self, document_id: int, user_id: int) -> dict[str, Any]:
+        document = knowledge_repository.find_document(document_id)
+        if document is None:
+            raise LookupError("知识文档不存在")
+        if int(document["create_by"]) != user_id:
+            raise PermissionError("该文档不是你上传的，无删除权限")
+        document_status = str(document["status"])
+        if document_status not in DELETABLE_DOCUMENT_STATUSES:
+            raise ValueError(f"文档状态为 {document_status}，后台任务可能仍在运行，暂不允许删除")
+
+        get_vector_service().delete_by_document(document_id)
+        storage_service = get_storage_service()
+        object_key = str(document.get("minio_object_key") or "")
+        if object_key:
+            storage_service.delete(object_key)
+        storage_service.delete_prefix(f"extracted/images/{document_id}/")
+
+        if not knowledge_repository.delete_document(document_id, user_id):
+            raise LookupError("知识文档不存在或已被删除")
+        return {"success": True, "document_id": document_id}
 
     def update_chunk_and_reindex(self, chunk_id: int, user_id: int,
                                  content: str | None = None,
@@ -76,14 +98,19 @@ class KnowledgeService:
     def regenerate_context(self, chunk_id: int, user_id: int) -> dict[str, Any]:
         chunk = self._get_chunk(chunk_id, user_id)
         document_context = (chunk.get("document_metadata") or {}).get("document_context") or {}
+        analysis_model = (chunk.get("document_metadata") or {}).get("llm_model")
         context = get_deepseek_service().regenerate_context(
-            document_context, chunk.get("strategy_code"), str(chunk["content"])
+            document_context,
+            chunk.get("strategy_code"),
+            str(chunk["content"]),
+            model=str(analysis_model) if analysis_model else None,
         )
         attempts = 0
         while len(context.strip()) > SETTINGS.context_max_chars and attempts < 2:
             context = get_deepseek_service().regenerate_context(
                 document_context, chunk.get("strategy_code"), str(chunk["content"]),
                 previous_context=context, compress=True,
+                model=str(analysis_model) if analysis_model else None,
             )
             attempts += 1
         context = self._validate_context(context)

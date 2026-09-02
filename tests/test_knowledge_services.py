@@ -1,5 +1,7 @@
 from typing import Any
 
+import pytest
+
 from app.services.embedding_service import HybridEmbedding, SparseEmbedding
 from app.services.knowledge_service import KnowledgeService
 from app.services.skill_service import knowledge_skill_service
@@ -103,3 +105,86 @@ def test_document_skill_composes_three_rules() -> None:
     assert "document_analysis" in prompt
     assert "chunk_planning" in prompt
     assert "strategy_judgement" in prompt
+
+
+def test_delete_document_removes_external_data_before_postgresql(monkeypatch) -> None:
+    events: list[str] = []
+
+    class FakeVector:
+        def delete_by_document(self, document_id: int) -> None:
+            assert document_id == 2
+            events.append("qdrant")
+
+    class FakeStorage:
+        def delete(self, object_key: str) -> None:
+            assert object_key == "raw/docx/2/example.docx"
+            events.append("minio_raw")
+
+        def delete_prefix(self, prefix: str) -> None:
+            assert prefix == "extracted/images/2/"
+            events.append("minio_images")
+
+    monkeypatch.setattr(
+        "app.services.knowledge_service.knowledge_repository.find_document",
+        lambda document_id: {
+            "id": document_id,
+            "create_by": 1,
+            "status": "INDEXED",
+            "minio_object_key": "raw/docx/2/example.docx",
+        },
+    )
+    monkeypatch.setattr(
+        "app.services.knowledge_service.knowledge_repository.delete_document",
+        lambda document_id, user_id: events.append("postgresql") or True,
+    )
+    monkeypatch.setattr(
+        "app.services.knowledge_service.get_vector_service",
+        lambda: FakeVector(),
+    )
+    monkeypatch.setattr(
+        "app.services.knowledge_service.get_storage_service",
+        lambda: FakeStorage(),
+    )
+
+    result = KnowledgeService().delete_document(2, 1)
+
+    assert result == {"success": True, "document_id": 2}
+    assert events == ["qdrant", "minio_raw", "minio_images", "postgresql"]
+
+
+def test_delete_document_rejects_non_owner_before_external_calls(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.knowledge_service.knowledge_repository.find_document",
+        lambda document_id: {
+            "id": document_id,
+            "create_by": 99,
+            "status": "FAILED",
+            "minio_object_key": "raw/docx/2/example.docx",
+        },
+    )
+    monkeypatch.setattr(
+        "app.services.knowledge_service.get_vector_service",
+        lambda: (_ for _ in ()).throw(AssertionError("越权请求不能访问 Qdrant")),
+    )
+
+    with pytest.raises(PermissionError, match="不是你上传的"):
+        KnowledgeService().delete_document(2, 1)
+
+
+def test_delete_document_rejects_processing_document(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.knowledge_service.knowledge_repository.find_document",
+        lambda document_id: {
+            "id": document_id,
+            "create_by": 1,
+            "status": "PROCESSING",
+            "minio_object_key": "raw/docx/2/example.docx",
+        },
+    )
+    monkeypatch.setattr(
+        "app.services.knowledge_service.get_vector_service",
+        lambda: (_ for _ in ()).throw(AssertionError("处理中请求不能访问 Qdrant")),
+    )
+
+    with pytest.raises(ValueError, match="暂不允许删除"):
+        KnowledgeService().delete_document(2, 1)

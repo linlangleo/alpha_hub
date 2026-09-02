@@ -19,13 +19,16 @@ class DocumentBlock:
 
     def content(self) -> str:
         if self.type == "image" and self.image_id:
-            return f"[[IMAGE:{self.image_id}]]"
+            marker = f"[[IMAGE:{self.image_id}]]"
+            return f"{marker}\n\n{self.text}" if self.text else marker
         return self.text
 
     def analysis_dict(self) -> dict[str, Any]:
         value: dict[str, Any] = {"type": self.type, "index": self.index}
         if self.type == "image":
             value["image_id"] = self.image_id
+            if self.text:
+                value["text"] = self.text
         else:
             value["text"] = self.text
         return value
@@ -40,7 +43,7 @@ class ExtractedImage:
 
 
 @dataclass
-class ParsedDocx:
+class ParsedDocument:
     blocks: list[DocumentBlock]
     images: list[ExtractedImage]
 
@@ -48,7 +51,7 @@ class ParsedDocx:
 class DocxParser:
     """Parse DOCX body blocks while retaining paragraph/table/image order."""
 
-    def parse(self, content: bytes) -> ParsedDocx:
+    def parse(self, content: bytes) -> ParsedDocument:
         document = Document(BytesIO(content))
         blocks: list[DocumentBlock] = []
         images: list[ExtractedImage] = []
@@ -63,7 +66,7 @@ class DocxParser:
 
         if not blocks:
             raise RuntimeError("DOCX 没有可解析的文字、图片或表格")
-        return ParsedDocx(blocks=blocks, images=images)
+        return ParsedDocument(blocks=blocks, images=images)
 
     def _append_paragraph(
         self,
@@ -128,3 +131,6 @@ class DocxParser:
         separator = "| " + " | ".join(["---"] * width) + " |"
         body = ["| " + " | ".join(row) + " |" for row in normalized[1:]]
         return "\n".join([header, separator, *body])
+
+
+ParsedDocx = ParsedDocument

@@ -22,17 +22,32 @@
 
 ## 开发约束
 
-- 配置仅来自环境变量或 `.env`，新增变量同步更新 `.env.example`、README 和 TODO。
+- `config/config.json` 提供开发默认值，环境变量或 `.env` 可选覆盖；不要提交真实服务凭证。
 - 禁止在业务代码中直接调用 OSS、Qdrant 或具体 Embedding SDK；必须经过抽象服务。
 - 文档状态使用 `UPLOADED`、`PROCESSING`、`INDEXED`、`FAILED`。
 - 所有检索必须携带 `knowledge_base_id` 过滤条件。
 - 不使用 SQLite；数据库开发与集成测试使用 PostgreSQL，单元测试 mock repository 边界。
 - 保持 PEP 8、4 空格缩进、120 字符以内，并为公共接口添加类型标注。
 
+## API 开发规范
+
+- 业务接口只使用 GET 和 POST，禁止新增 PUT、PATCH、DELETE。
+- GET 仅用于无副作用查询；业务 ID 使用路径参数并放在 URL 最后。
+- POST 用于新增、修改、删除和触发任务；业务参数放入 JSON Body，不使用路径参数。
+- 文件上传使用 POST 和 `multipart/form-data`。
+- 登录 Token 统一通过 `Authorization: Bearer <token>` 请求头传递，不放入 URL 或请求体。
+- 接口路径必须体现行为，例如 `/list`、`/detail/{id}`、`/update-summary`、`/delete`。
+- 所有 JSON API 响应统一为 `{code: number, msg: string, data: any}`；`code=0` 表示成功，失败响应的 `data` 固定为 `null`。
+- 只要应用形成 JSON 响应，HTTP 状态码统一为 `200`；成功和失败只通过响应体 `code` 判断。
+- 路由成功时返回 `R.ok(...)`；业务失败抛出 `BusinessException`。业务代码禁止抛出 `HTTPException` 或直接返回 `JSONResponse`。
+- 业务错误码按 `docs/API.md` 的 4 位模块号段分配，并集中维护在 `app/common/codes/`；新增枚举必须加入 `ALL_CODE_ENUMS`。
+- API 异常由 `app/common/handler.py` 的全局处理器转换，响应不得包含未包装的 `detail` 或异常堆栈。
+- 新增或修改接口时必须同步更新 `docs/API.md`、前端调用和自动化测试。
+- 完整接口约定和接口清单以 `docs/API.md` 为准。
+
 ## 常用命令
 
 ```bash
-cp .env.example .env
 docker compose up -d --build
 pytest
 python -m py_compile app/main.py

@@ -1,3 +1,4 @@
+import base64
 import json
 from typing import Any
 
@@ -19,23 +20,33 @@ class DeepSeekService:
         self.client = OpenAI(api_key=api_key or "not-configured", base_url=base_url,
                              timeout=timeout, max_retries=retry)
 
-    def chat(self, system_prompt: str, user_prompt: str) -> str:
+    def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str | None = None,
+    ) -> str:
         self._require_enabled()
         response = self.client.chat.completions.create(
-            model=self.model,
+            model=model or self.model,
             messages=[{"role": "system", "content": system_prompt},
                       {"role": "user", "content": self._validate_input(user_prompt)}],
             max_tokens=self.max_output_tokens,
         )
         return response.choices[0].message.content or ""
 
-    def structured_chat(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+    def structured_chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str | None = None,
+    ) -> dict[str, Any]:
         self._require_enabled()
         bounded_prompt = self._validate_input(user_prompt)
         last_error: Exception | None = None
         for _ in range(self.retry):
             response = self.client.chat.completions.create(
-                model=self.model,
+                model=model or self.model,
                 messages=[{"role": "system", "content": system_prompt},
                           {"role": "user", "content": bounded_prompt}],
                 response_format={"type": "json_object"},
@@ -52,8 +63,13 @@ class DeepSeekService:
             last_error = RuntimeError("DeepSeek Structured Output 顶层必须是 JSON Object")
         raise RuntimeError("DeepSeek 连续返回空内容或无法解析的 JSON") from last_error
 
-    def analyze_document(self, document: dict[str, Any], blocks: list[dict[str, Any]],
-                         strategies: list[dict[str, Any]]) -> dict[str, Any]:
+    def analyze_document(
+        self,
+        document: dict[str, Any],
+        blocks: list[dict[str, Any]],
+        strategies: list[dict[str, Any]],
+        model: str | None = None,
+    ) -> dict[str, Any]:
         rules = knowledge_skill_service.combine(
             "document_analysis", "chunk_planning", "strategy_judgement"
         )
@@ -66,13 +82,17 @@ class DeepSeekService:
 chunks 必须覆盖全部 block，连续、按升序、无交叉、无重复。'''
         payload = {"document": document, "blocks": blocks,
                    "formal_strategies": self._strategies(strategies)}
-        return self.structured_chat(f"{rules}\n\n{schema}",
-                                    json.dumps(payload, ensure_ascii=False))
+        return self.structured_chat(
+            f"{rules}\n\n{schema}",
+            json.dumps(payload, ensure_ascii=False),
+            model=model,
+        )
 
     def analyze_chunk_batch(self, document_context: dict[str, Any],
                             document_strategy_code: str | None,
                             chunks: list[dict[str, Any]], strategies: list[dict[str, Any]],
-                            existing_tags: list[str]) -> dict[str, Any]:
+                            existing_tags: list[str],
+                            model: str | None = None) -> dict[str, Any]:
         rules = knowledge_skill_service.combine(
             "chunk_context", "chunk_metadata", "strategy_judgement", "tag_generation"
         )
@@ -85,13 +105,17 @@ chunks 必须覆盖全部 block，连续、按升序、无交叉、无重复。'
                    "document_strategy_code": document_strategy_code, "chunks": chunks,
                    "formal_strategies": self._strategies(strategies),
                    "existing_tags": existing_tags}
-        return self.structured_chat(f"{rules}\n\n{schema}",
-                                    json.dumps(payload, ensure_ascii=False))
+        return self.structured_chat(
+            f"{rules}\n\n{schema}",
+            json.dumps(payload, ensure_ascii=False),
+            model=model,
+        )
 
     def regenerate_context(self, document_context: dict[str, Any],
                            strategy_code: str | None, content: str,
                            previous_context: str | None = None,
-                           compress: bool = False) -> str:
+                           compress: bool = False,
+                           model: str | None = None) -> str:
         rules = knowledge_skill_service.combine("chunk_context")
         instruction = ("现有 context 超过限制。请在不新增信息的前提下重新压缩到 100 个中文字符以内。"
                        if compress else "请生成新的 context。")
@@ -100,8 +124,63 @@ chunks 必须覆盖全部 block，连续、按升序、无交叉、无重复。'
             json.dumps({"instruction": instruction, "document_context": document_context,
                         "strategy_code": strategy_code, "content": content,
                         "previous_context": previous_context}, ensure_ascii=False),
+            model=model,
         )
         return str(result.get("context") or "").strip()
+
+    def analyze_image(
+        self,
+        image: bytes,
+        content_type: str,
+        filename: str,
+        model: str,
+    ) -> dict[str, Any]:
+        self._require_enabled()
+        rules = knowledge_skill_service.combine("image_analysis")
+        schema = (
+            '只返回 JSON：{"title":"string","transcription":"string",'
+            '"description":"string"}'
+        )
+        image_url = (
+            f"data:{content_type};base64,"
+            f"{base64.b64encode(image).decode('ascii')}"
+        )
+        last_error: Exception | None = None
+        for _ in range(self.retry):
+            response = self.client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": f"{rules}\n\n{schema}"},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"提取并描述知识图片：{filename}",
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": image_url,
+                                    "detail": "original",
+                                },
+                            },
+                        ],
+                    },
+                ],
+                response_format={"type": "json_object"},
+                max_tokens=self.max_output_tokens,
+            )
+            content = response.choices[0].message.content or ""
+            try:
+                result = json.loads(content)
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                continue
+            if isinstance(result, dict):
+                return result
+            last_error = RuntimeError("DeepSeek 图片分析结果必须是 JSON Object")
+        raise RuntimeError("DeepSeek 连续返回空图片分析或无法解析的 JSON") from last_error
 
     def answer_knowledge(self, question: str, contexts: list[dict[str, Any]]) -> str:
         rules = knowledge_skill_service.combine("rag_answer")

@@ -51,7 +51,7 @@ python main.py
 DEEPSEEK_API_KEY=填写本地DeepSeekKey
 ```
 
-直接复制 `.env.example` 时必须填完其中的空密码，否则空值会覆盖默认配置。
+如使用根目录 `.env`，不要保留空配置值，否则空值会覆盖 `config/config.json` 的默认配置。
 
 ## PostgreSQL
 
@@ -288,19 +288,28 @@ context.strip() + "\n" + content.strip()
 Context 为空时只使用 Content；Title、Summary 和 Tags 不参与 Embedding。默认配置为 1024 维、
 CPU、Batch Size 4，CPU 首次验收可改为 1。
 
-自动下载并预热：
+服务加载 BGE-M3 时先检查 Hugging Face 本地缓存。缓存完整时直接把本地快照路径交给
+FlagEmbedding，不请求远端；缓存缺失或不完整时才联网下载。下载时跳过当前推理不使用的
+ONNX 权重和示例图片。
+
+`config/config.json` 的 `embedding.download_if_missing` 默认为 `true`，可用
+`EMBEDDING_DOWNLOAD_IF_MISSING=false` 禁止自动下载。自动下载完成后，后续启动继续
+使用本地缓存。
+
+下载并预热：
 
 ```powershell
 python -c "from app.services.container import get_embedding_service; v=get_embedding_service().encode_query('AlphaHub 模型预热'); print('Dense:',len(v.dense),'Sparse:',len(v.sparse.indices))"
 ```
 
-FlagEmbedding 当前会下载 PyTorch 和 ONNX 两套权重，总量约 4.57GB。只下载 PyTorch：
+已有旧缓存可能同时包含 PyTorch 和 ONNX 两套权重，总量约 4.57GB；当前自动下载会跳过
+ONNX。也可以手工只下载 PyTorch：
 
 ```powershell
 python -c "from huggingface_hub import snapshot_download; print(snapshot_download('BAAI/bge-m3', local_dir=r'D:\data\models\bge-m3', ignore_patterns=['onnx/*','imgs/*']))"
 ```
 
-下载后将 `embedding.model` 改为 `D:\\data\\models\\bge-m3`。
+下载后可将 `embedding.model` 改为本地目录；保留 `BAAI/bge-m3` 时也会优先解析本地缓存。
 
 ## 知识入库流程
 
@@ -338,7 +347,7 @@ python -m compileall -q app tests
 
 ## 当前限制
 
-- 只解析 DOCX。
-- 后台任务使用 FastAPI `BackgroundTasks`，进程重启不会自动恢复。
+- 支持 DOCX、PDF、TXT 和独立图片；扫描型 PDF 暂不执行 OCR 或 Vision。
+- 后台任务使用 FastAPI `BackgroundTasks`，进程重启不会自动续跑，可在失败后手动重新处理。
 - BGE-M3 在 CPU 上推理较慢。
 - 尚无持久化入库时间线、LLM 调用审计和问答历史。

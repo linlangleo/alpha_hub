@@ -1,6 +1,7 @@
 const Api = (() => {
   const tokenKey = "alpha_hub_token";
   const usernameKey = "alpha_hub_username";
+  const sessionErrorCodes = new Set([2000, 2001]);
 
   async function request(path, options = {}) {
     const headers = new Headers(options.headers || {});
@@ -13,17 +14,17 @@ const Api = (() => {
     const contentType = response.headers.get("content-type") || "";
     const body = contentType.includes("application/json")
       ? await response.json()
-      : { detail: await response.text() };
-    if (!response.ok) {
-      if (response.status === 401) {
+      : { code: response.status * 100, msg: await response.text(), data: null };
+    if (!response.ok || body.code !== 0) {
+      if (sessionErrorCodes.has(body.code)) {
         clearLogin();
         if (!location.pathname.endsWith("login.html") && location.pathname !== "/") {
           location.href = "/login.html";
         }
       }
-      throw new Error(body.detail || "请求失败");
+      throw new Error(body.msg || "请求失败");
     }
-    return body;
+    return body.data;
   }
 
   function saveLogin(token, username) {

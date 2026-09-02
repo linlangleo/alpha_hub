@@ -1,10 +1,13 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_user_id
 from app.api.utils import serialize_ids
+from app.common.codes import RagCode
+from app.common.exception import BusinessException
+from app.common.response import R
 from app.core.config import SETTINGS
 from app.workflows.rag_qa import rag_qa_workflow
 
@@ -36,7 +39,7 @@ class AskRequest(BaseModel):
 def search(
     payload: SearchRequest,
     user_id: int = Depends(require_user_id),
-) -> dict[str, Any]:
+) -> R[dict[str, Any]]:
     try:
         items = rag_qa_workflow.retrieve(
             payload.query.strip(),
@@ -45,15 +48,15 @@ def search(
             payload.filters.model_dump(exclude_none=True) if payload.filters else None,
         )
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"知识检索失败: {exc}") from exc
-    return serialize_ids({"items": items})
+        raise BusinessException(RagCode.SEARCH_FAILED) from exc
+    return R.ok(serialize_ids({"items": items}))
 
 
 @router.post("/knowledge/ask")
 def ask(
     payload: AskRequest,
     user_id: int = Depends(require_user_id),
-) -> dict[str, Any]:
+) -> R[dict[str, Any]]:
     try:
         result = rag_qa_workflow.answer(
             payload.question.strip(),
@@ -63,5 +66,5 @@ def ask(
             payload.filters.model_dump(exclude_none=True) if payload.filters else None,
         )
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"AI 知识问答失败: {exc}") from exc
-    return serialize_ids(result)
+        raise BusinessException(RagCode.ANSWER_FAILED) from exc
+    return R.ok(serialize_ids(result))

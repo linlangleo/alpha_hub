@@ -40,6 +40,12 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_list(name: str, default: list[str]) -> tuple[str, ...]:
+    value = os.getenv(name)
+    values = default if value is None else value.split(",")
+    return tuple(item.strip() for item in values if item.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     minio_endpoint: str
@@ -53,6 +59,8 @@ class Settings:
     deepseek_api_key: str
     deepseek_base_url: str
     deepseek_model: str
+    deepseek_text_models: tuple[str, ...]
+    deepseek_vision_model: str
     deepseek_timeout: float
     deepseek_retry: int
     deepseek_max_input_chars: int
@@ -62,6 +70,7 @@ class Settings:
     embedding_device: str
     embedding_batch_size: int
     embedding_max_length: int
+    embedding_download_if_missing: bool
     retrieval_mode: str
     top_k: int
     neighbor_window: int
@@ -90,6 +99,16 @@ class Settings:
             deepseek_api_key=str(_env("DEEPSEEK_API_KEY", deepseek.get("api_key", ""))),
             deepseek_base_url=str(_env("DEEPSEEK_BASE_URL", deepseek["base_url"])),
             deepseek_model=str(_env("DEEPSEEK_MODEL", deepseek["model"])),
+            deepseek_text_models=_env_list(
+                "DEEPSEEK_TEXT_MODELS",
+                deepseek.get("text_models", [deepseek["model"]]),
+            ),
+            deepseek_vision_model=str(
+                _env(
+                    "DEEPSEEK_VISION_MODEL",
+                    deepseek.get("vision_model", "deepseek-v4-flash-vision-exp"),
+                )
+            ),
             deepseek_timeout=float(_env("DEEPSEEK_TIMEOUT", deepseek.get("timeout", 60))),
             deepseek_retry=int(_env("DEEPSEEK_RETRY", deepseek.get("retry", 3))),
             deepseek_max_input_chars=int(
@@ -104,6 +123,10 @@ class Settings:
             embedding_batch_size=int(_env("EMBEDDING_BATCH_SIZE", embedding.get("batch_size", 4))),
             embedding_max_length=int(
                 _env("EMBEDDING_MAX_LENGTH", embedding.get("max_length", 8192))
+            ),
+            embedding_download_if_missing=_env_bool(
+                "EMBEDDING_DOWNLOAD_IF_MISSING",
+                bool(embedding.get("download_if_missing", True)),
             ),
             retrieval_mode=str(_env("RETRIEVAL_MODE", knowledge.get("mode", "hybrid"))),
             top_k=int(_env("RETRIEVAL_TOP_K", knowledge.get("top_k", 8))),
