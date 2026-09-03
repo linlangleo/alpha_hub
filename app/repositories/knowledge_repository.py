@@ -101,6 +101,7 @@ def claim_failed_document(document_id: int, user_id: int) -> bool:
                         "stage_label": "等待重新处理",
                         "error_stage": None,
                         "error_message": None,
+                        "error_detail": None,
                     }
                 ),
                 user_id,

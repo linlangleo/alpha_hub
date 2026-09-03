@@ -9,6 +9,7 @@ from app.core.snowflake import generate_id
 from app.repositories import knowledge_repository, strategy_repository
 from app.services.container import (get_deepseek_service, get_embedding_service,
                                     get_storage_service, get_vector_service)
+from app.services.deepseek_service import DeepSeekStructuredOutputError
 from app.services.docx_parser import DocumentBlock, DocxParser
 from app.services.embedding_service import build_embedding_text
 from app.services.image_parser import ImageParser
@@ -43,6 +44,10 @@ VECTOR_RETRY_STAGES = {
     "EMBEDDING_MODEL_PREPARE_FAILED",
     "EMBEDDING_ENCODE_FAILED",
     "QDRANT_UPSERT_FAILED",
+}
+DOCUMENT_ANALYSIS_CHECKPOINT_RETRY_STAGES = {
+    "CHUNK_ANALYSIS_FAILED",
+    "DATABASE_SAVE_FAILED",
 }
 
 
@@ -101,7 +106,8 @@ class KnowledgeIngestionWorkflow:
         document["minio_object_key"] = object_key
         return document
 
-    def process(self, document_id: int, user_id: int) -> None:
+    def process(self, document_id: int, user_id: int,
+                reuse_document_analysis: bool = False) -> None:
         saved_chunk_ids: list[int] = []
         stage = "PARSE_FAILED"
         try:
@@ -127,16 +133,28 @@ class KnowledgeIngestionWorkflow:
             self._store_images(document_id, parsed.blocks, parsed.images)
 
             stage = "DOCUMENT_ANALYSIS_FAILED"
-            self._progress(document_id, user_id, "DOCUMENT_ANALYSIS", 35, "文档理解中")
             strategies = strategy_repository.list_strategies()
-            document_analysis = get_deepseek_service().analyze_document(
-                {"name": document["name"], "original_filename": document["original_filename"],
-                 "source_type": document["source_type"], "source_name": document["source_name"],
-                 "category": document["category"]},
-                [block.analysis_dict() for block in parsed.blocks],
-                strategies,
-                model=analysis_model,
+            checkpoint = (
+                self._load_document_analysis_checkpoint(document)
+                if reuse_document_analysis else None
             )
+            checkpoint_reused = checkpoint is not None
+            if checkpoint_reused:
+                document_analysis = checkpoint
+                self._progress(document_id, user_id, "DOCUMENT_ANALYSIS", 35,
+                               "复用文档分析结果")
+            else:
+                self._progress(document_id, user_id, "DOCUMENT_ANALYSIS", 35, "文档理解中")
+                document_analysis = get_deepseek_service().analyze_document(
+                    {"name": document["name"],
+                     "original_filename": document["original_filename"],
+                     "source_type": document["source_type"],
+                     "source_name": document["source_name"],
+                     "category": document["category"]},
+                    [block.analysis_dict() for block in parsed.blocks],
+                    strategies,
+                    model=analysis_model,
+                )
             requested_strategy = (strategy_repository.get_strategy(int(document["strategy_id"]))
                                   if document.get("strategy_id") else None)
             by_code = {str(item["code"]): item for item in strategies}
@@ -149,6 +167,17 @@ class KnowledgeIngestionWorkflow:
             base_chunks = self._rebuild_chunks(parsed.blocks, document_analysis)
             if not base_chunks:
                 raise RuntimeError("文档分析后没有生成有效 Chunk")
+            if not checkpoint_reused:
+                stage = "DOCUMENT_ANALYSIS_CHECKPOINT_SAVE_FAILED"
+                knowledge_repository.update_document_status(
+                    document_id,
+                    "PROCESSING",
+                    user_id,
+                    {
+                        "document_analysis_checkpoint":
+                            self._build_document_analysis_checkpoint(document_analysis)
+                    },
+                )
 
             stage = "CHUNK_ANALYSIS_FAILED"
             self._progress(document_id, user_id, "CHUNK_ANALYSIS", 50, "Chunk 批量分析中")
@@ -204,7 +233,8 @@ class KnowledgeIngestionWorkflow:
                 {"progress": 100, "processing_stage": None, "stage_label": "完成",
                  "embedding_model": embedding_service.model_name,
                  "embedding_dimension": embedding_service.dimension,
-                 "error_stage": None, "error_message": None},
+                 "error_stage": None, "error_message": None, "error_detail": None,
+                 "document_analysis_checkpoint": None},
             )
         except Exception as exc:
             logger.exception("Knowledge ingestion failed document_id=%s chunk_ids=%s stage=%s",
@@ -243,7 +273,13 @@ class KnowledgeIngestionWorkflow:
         if error_stage in VECTOR_RETRY_STAGES:
             self._resume_indexing(document_id, user_id)
             return
-        self.process(document_id, user_id)
+        self.process(
+            document_id,
+            user_id,
+            reuse_document_analysis=(
+                error_stage in DOCUMENT_ANALYSIS_CHECKPOINT_RETRY_STAGES
+            ),
+        )
 
     def _resume_indexing(self, document_id: int, user_id: int) -> None:
         saved_chunk_ids: list[int] = []
@@ -254,7 +290,7 @@ class KnowledgeIngestionWorkflow:
                 raise LookupError("知识文档不存在")
             chunks = knowledge_repository.list_document_chunks(document_id, user_id)
             if not chunks:
-                self.process(document_id, user_id)
+                self.process(document_id, user_id, reuse_document_analysis=True)
                 return
             saved_chunk_ids = [int(item["id"]) for item in chunks]
 
@@ -300,6 +336,8 @@ class KnowledgeIngestionWorkflow:
                     "embedding_dimension": embedding_service.dimension,
                     "error_stage": None,
                     "error_message": None,
+                    "error_detail": None,
+                    "document_analysis_checkpoint": None,
                 },
             )
         except Exception as exc:
@@ -578,6 +616,34 @@ class KnowledgeIngestionWorkflow:
         return "".join(char if char.isalnum() or char in "._- " else "_" for char in safe)[:240]
 
     @staticmethod
+    def _build_document_analysis_checkpoint(
+        document_analysis: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "document_summary": document_analysis.get("document_summary"),
+            "document_context": document_analysis.get("document_context"),
+            "category": document_analysis.get("category"),
+            "strategy_code": document_analysis.get("strategy_code"),
+            "strategy_candidate": document_analysis.get("strategy_candidate"),
+            "chunks": document_analysis.get("chunks"),
+        }
+
+    @staticmethod
+    def _load_document_analysis_checkpoint(
+        document: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        checkpoint = (document.get("metadata") or {}).get(
+            "document_analysis_checkpoint"
+        )
+        if not isinstance(checkpoint, dict):
+            return None
+        if not isinstance(checkpoint.get("document_context"), dict):
+            return None
+        if not isinstance(checkpoint.get("chunks"), list):
+            return None
+        return checkpoint
+
+    @staticmethod
     def _progress(document_id: int, user_id: int, processing_stage: str,
                   progress: int, label: str) -> None:
         knowledge_repository.update_document_status(
@@ -587,10 +653,16 @@ class KnowledgeIngestionWorkflow:
 
     @staticmethod
     def _fail(document_id: int, user_id: int, stage: str, exc: Exception) -> None:
+        error_detail = (
+            exc.as_detail()
+            if isinstance(exc, DeepSeekStructuredOutputError)
+            else None
+        )
         knowledge_repository.update_document_status(
             document_id, "FAILED", user_id,
             {"processing_stage": None, "progress": 100, "stage_label": "失败",
-             "error_stage": stage, "error_message": str(exc)[:2000]},
+             "error_stage": stage, "error_message": str(exc)[:2000],
+             "error_detail": error_detail},
         )
 
 

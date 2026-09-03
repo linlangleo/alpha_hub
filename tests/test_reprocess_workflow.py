@@ -6,6 +6,7 @@ from app.services.embedding_service import (
     HybridEmbedding,
     SparseEmbedding,
 )
+from app.services.deepseek_service import DeepSeekStructuredOutputError
 from app.workflows.knowledge_ingestion import KnowledgeIngestionWorkflow
 
 
@@ -169,3 +170,71 @@ def test_vector_stage_reprocess_reuses_saved_chunks(monkeypatch) -> None:
     assert ("delete", 8) in events
     assert ("upsert", [10]) in events
     assert ("document", "INDEXED", None) in events
+
+
+def test_chunk_failure_reprocess_requests_document_checkpoint_reuse(monkeypatch) -> None:
+    calls: list[tuple[int, int, bool]] = []
+    workflow = KnowledgeIngestionWorkflow()
+    monkeypatch.setattr(
+        workflow,
+        "process",
+        lambda document_id, user_id, reuse_document_analysis=False: calls.append(
+            (document_id, user_id, reuse_document_analysis)
+        ),
+    )
+
+    workflow.reprocess(8, 7, "CHUNK_ANALYSIS_FAILED")
+    workflow.reprocess(9, 7, "DOCUMENT_ANALYSIS_FAILED")
+
+    assert calls == [(8, 7, True), (9, 7, False)]
+
+
+def test_ingestion_failure_persists_deepseek_error_detail(monkeypatch) -> None:
+    updates: list[tuple[int, str, int, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        "app.workflows.knowledge_ingestion.knowledge_repository.update_document_status",
+        lambda document_id, status, user_id, metadata: updates.append(
+            (document_id, status, user_id, metadata)
+        ),
+    )
+    error = DeepSeekStructuredOutputError(
+        "DeepSeek 返回内容不是合法 JSON",
+        error_type="INVALID_JSON",
+        operation="chunk_analysis",
+        model="deepseek-v4-flash",
+        attempt=3,
+        response_id="response-3",
+        finish_reason="stop",
+        response_chars=826,
+        json_error="Expecting ',' delimiter",
+        json_line=12,
+        json_column=18,
+    )
+
+    KnowledgeIngestionWorkflow._fail(8, 7, "CHUNK_ANALYSIS_FAILED", error)
+
+    metadata = updates[0][3]
+    assert updates[0][:3] == (8, "FAILED", 7)
+    assert metadata["error_message"] == "DeepSeek 返回内容不是合法 JSON"
+    assert metadata["error_detail"]["error_type"] == "INVALID_JSON"
+    assert metadata["error_detail"]["json_line"] == 12
+
+
+def test_document_analysis_checkpoint_keeps_only_reusable_fields() -> None:
+    workflow = KnowledgeIngestionWorkflow()
+    checkpoint = workflow._build_document_analysis_checkpoint(
+        {
+            "document_summary": "摘要",
+            "document_context": {"topic": "主题"},
+            "category": "other",
+            "strategy_code": None,
+            "strategy_candidate": None,
+            "chunks": [{"start_block": 0, "end_block": 2}],
+            "unexpected": "不保存",
+        }
+    )
+
+    assert "unexpected" not in checkpoint
+    assert workflow._load_document_analysis_checkpoint(
+        {"metadata": {"document_analysis_checkpoint": checkpoint}}
+    ) == checkpoint

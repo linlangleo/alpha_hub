@@ -245,6 +245,9 @@ Chunk 的 `image_keys` 指向 MinIO 原图；PostgreSQL 保存上述文字内容
 - `EMBEDDING_FAILED`、`EMBEDDING_MODEL_PREPARE_FAILED`、
   `EMBEDDING_ENCODE_FAILED` 和 `QDRANT_UPSERT_FAILED` 复用 PostgreSQL 已有 Chunk，
   只重新执行 BGE-M3 和 Qdrant，不重复调用 DeepSeek。
+- `CHUNK_ANALYSIS_FAILED` 和 `DATABASE_SAVE_FAILED` 从 MinIO 重新解析原文件，但复用
+  `metadata.document_analysis_checkpoint`，不重复调用文档级 DeepSeek；如果旧数据没有检查点，
+  自动回退为完整处理。
 - 其他失败阶段从 MinIO 读取原文件，重新执行完整入库流程，不重复上传原文件。
 - 原文件不存在时拒绝完整重处理，并提示重新上传。
 
@@ -322,7 +325,9 @@ Chunk 的 `image_keys` 指向 MinIO 原图；PostgreSQL 保存上述文字内容
 - `FAILED`：后台入库已经终止。
 
 详细阶段位于 `metadata.processing_stage`，失败信息位于
-`metadata.error_stage/error_message`。
+`metadata.error_stage/error_message/error_detail`。DeepSeek Structured Output 失败时，
+`error_detail` 记录错误类型、调用阶段、模型、尝试次数、响应 ID、结束原因、响应长度以及
+JSON 解析位置；完整原始响应不写入 PostgreSQL，后端日志仅记录最多 1000 字符的失败响应片段。
 
 ## 检索边界
 

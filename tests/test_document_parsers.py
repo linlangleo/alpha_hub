@@ -1,3 +1,4 @@
+import logging
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -7,7 +8,10 @@ from PIL import Image
 
 from app.core.config import SETTINGS
 from app.services.image_parser import ImageParser
-from app.services.deepseek_service import DeepSeekService
+from app.services.deepseek_service import (
+    DeepSeekService,
+    DeepSeekStructuredOutputError,
+)
 from app.services.pdf_parser import PdfParser
 from app.services.text_parser import TextParser
 from app.workflows.knowledge_ingestion import KnowledgeIngestionWorkflow
@@ -70,7 +74,8 @@ def test_analysis_model_is_selected_by_file_type() -> None:
         workflow._select_model("text", SETTINGS.deepseek_vision_model)
 
 
-def test_deepseek_call_uses_selected_model_and_vision_content() -> None:
+def test_deepseek_call_uses_selected_model_and_vision_content(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="app.services.deepseek_service")
     calls = []
 
     class Completions:
@@ -108,3 +113,81 @@ def test_deepseek_call_uses_selected_model_and_vision_content() -> None:
     user_content = calls[1]["messages"][1]["content"]
     assert user_content[1]["type"] == "image_url"
     assert user_content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert "DeepSeek request started operation=structured_chat" in caplog.text
+    assert "DeepSeek request succeeded operation=structured_chat" in caplog.text
+    assert "DeepSeek request succeeded operation=image_analysis" in caplog.text
+
+
+def test_deepseek_invalid_json_exposes_structured_diagnostics(caplog) -> None:
+    class Completions:
+        @staticmethod
+        def create(**kwargs):
+            message = SimpleNamespace(content='{"chunks": [}')
+            choice = SimpleNamespace(message=message, finish_reason="stop")
+            return SimpleNamespace(id="response-1", choices=[choice])
+
+    service = DeepSeekService(
+        api_key="test",
+        base_url="https://api.deepseek.com",
+        model="deepseek-v4-flash",
+        timeout=1,
+        retry=1,
+        max_input_chars=1000,
+        max_output_tokens=100,
+    )
+    service.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=Completions())
+    )
+
+    with pytest.raises(DeepSeekStructuredOutputError) as raised:
+        service.structured_chat("system", "{}", operation="chunk_analysis")
+
+    detail = raised.value.as_detail()
+    assert str(raised.value) == "DeepSeek 返回内容不是合法 JSON"
+    assert detail["error_type"] == "INVALID_JSON"
+    assert detail["operation"] == "chunk_analysis"
+    assert detail["response_id"] == "response-1"
+    assert detail["finish_reason"] == "stop"
+    assert detail["json_line"] == 1
+    assert detail["json_column"] == 13
+    assert "response_preview" in caplog.text
+
+
+def test_deepseek_length_finish_reason_is_reported_as_truncated() -> None:
+    class Completions:
+        @staticmethod
+        def create(**kwargs):
+            message = SimpleNamespace(
+                content="",
+                reasoning_content="正在推理但尚未生成最终 JSON",
+            )
+            choice = SimpleNamespace(message=message, finish_reason="length")
+            usage = SimpleNamespace(
+                prompt_tokens=2500,
+                completion_tokens=8192,
+                total_tokens=10692,
+            )
+            return SimpleNamespace(id="response-2", choices=[choice], usage=usage)
+
+    service = DeepSeekService(
+        api_key="test",
+        base_url="https://api.deepseek.com",
+        model="deepseek-v4-flash",
+        timeout=1,
+        retry=1,
+        max_input_chars=1000,
+        max_output_tokens=100,
+    )
+    service.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=Completions())
+    )
+
+    with pytest.raises(DeepSeekStructuredOutputError) as raised:
+        service.structured_chat("system", "{}", operation="chunk_analysis")
+
+    assert raised.value.error_type == "OUTPUT_TRUNCATED"
+    assert str(raised.value) == "DeepSeek 返回内容被截断"
+    assert raised.value.reasoning_chars == 16
+    assert raised.value.prompt_tokens == 2500
+    assert raised.value.completion_tokens == 8192
+    assert raised.value.total_tokens == 10692
