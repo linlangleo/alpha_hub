@@ -177,7 +177,8 @@ type ApiResponse<T> =
 - 可选 `strategy_id`。
 - `analysis_model`：DOCX/PDF/TXT 只能使用配置的文本模型；图片只能使用 Vision 模型。
 
-TXT 支持 UTF-8 和 GB18030。PDF 会按页面阅读顺序提取文本和内嵌图片；纯扫描 PDF
+TXT 支持 UTF-8 和 GB18030。PDF 会按页面阅读顺序提取文本和内嵌图片；页面带旋转
+方向（`/Rotate`）时，提取的内嵌图片会按页面显示方向自动转正。纯扫描 PDF
 暂不执行 OCR。独立图片最大 32 MB，这是当前 Base64 Vision 调用方式的限制。
 
 独立图片的原文件保存到 MinIO `raw/image/{year}/{month}/{document_id}/`。Vision 首先生成

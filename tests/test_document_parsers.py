@@ -39,6 +39,97 @@ def test_pdf_parser_extracts_text() -> None:
     )
 
 
+def _asymmetric_png_image() -> bytes:
+    image = Image.new("RGB", (60, 80))
+    pixels = image.load()
+    for y in range(80):
+        for x in range(60):
+            pixels[x, y] = (x * 4 % 256, y * 3 % 256, (x + y) * 2 % 256)
+    stream = BytesIO()
+    image.save(stream, format="PNG")
+    return stream.getvalue()
+
+
+def _rotated_full_page_pdf(rotation: int) -> bytes:
+    document = pymupdf.open()
+    page = document.new_page(width=60, height=80)
+    page.insert_image(page.rect, stream=_asymmetric_png_image())
+    page.set_rotation(rotation)
+    content = document.tobytes()
+    document.close()
+    return content
+
+
+def _visual_page_image(content: bytes, index: int = 0) -> Image.Image:
+    with pymupdf.open(stream=content, filetype="pdf") as document:
+        return document[index].get_pixmap().pil_image().convert("RGB").copy()
+
+
+def _mean_pixel_diff(first: Image.Image, second: Image.Image) -> float:
+    if first.size != second.size:
+        return float("inf")
+    first_pixels = list(first.convert("RGB").getdata())
+    second_pixels = list(second.convert("RGB").getdata())
+    total = sum(
+        abs(left - right)
+        for first_pixel, second_pixel in zip(first_pixels, second_pixels)
+        for left, right in zip(first_pixel, second_pixel)
+    )
+    return total / (len(first_pixels) * 3)
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_pdf_parser_aligns_embedded_image_with_page_rotation(rotation) -> None:
+    content = _rotated_full_page_pdf(rotation)
+
+    parsed = PdfParser().parse(content)
+
+    assert len(parsed.blocks) == 1
+    assert parsed.blocks[0].type == "image"
+    assert len(parsed.images) == 1
+    visual = _visual_page_image(content)
+    with Image.open(BytesIO(parsed.images[0].data)) as recovered:
+        assert abs(recovered.width - visual.width) <= 1
+        assert abs(recovered.height - visual.height) <= 1
+        assert _mean_pixel_diff(recovered, visual) < 2.0
+
+
+def test_pdf_parser_keeps_image_bytes_untouched_when_page_not_rotated() -> None:
+    content = _rotated_full_page_pdf(0)
+
+    parsed = PdfParser().parse(content)
+
+    with pymupdf.open(stream=content, filetype="pdf") as document:
+        raw = next(
+            block["image"]
+            for block in document[0].get_text("dict")["blocks"]
+            if block.get("type") == 1
+        )
+    assert parsed.images[0].data == bytes(raw)
+
+
+def test_pdf_parser_handles_mixed_page_rotation_in_one_document() -> None:
+    source_png = _asymmetric_png_image()
+    document = pymupdf.open()
+    for rotation in (0, 180, 90):
+        page = document.new_page(width=60, height=80)
+        page.insert_image(page.rect, stream=source_png)
+        page.set_rotation(rotation)
+    content = document.tobytes()
+    document.close()
+
+    parsed = PdfParser().parse(content)
+
+    assert len(parsed.images) == 3
+    assert [block.type for block in parsed.blocks] == ["image", "image", "image"]
+    for index in range(3):
+        visual = _visual_page_image(content, index)
+        with Image.open(BytesIO(parsed.images[index].data)) as recovered:
+            assert abs(recovered.width - visual.width) <= 1
+            assert abs(recovered.height - visual.height) <= 1
+            assert _mean_pixel_diff(recovered, visual) < 2.0
+
+
 def test_image_parser_preserves_reference_and_vision_text() -> None:
     stream = BytesIO()
     Image.new("RGB", (32, 32), color="white").save(stream, format="PNG")
